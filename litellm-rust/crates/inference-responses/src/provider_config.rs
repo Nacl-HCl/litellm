@@ -1,69 +1,23 @@
 use litellm_core_utils::get_llm_provider_logic::{
     CustomLlmProvider, LlmProviders, get_custom_llm_provider,
 };
-use litellm_host::interceptors::{ProviderIdentity, RequestContext};
+use litellm_host::interceptors::ProviderIdentity;
 use litellm_llms::{
     base_llm::responses::transformation::BaseResponsesApiConfig,
     openai::responses::transformation::OpenAiResponsesApiConfig,
     openrouter::responses::transformation::OPENROUTER_RESPONSES_CONFIG,
 };
-use litellm_secrets::source::SecretSource;
-use serde_json::Value;
 
-use super::{
-    Error,
-    types::{ProviderResponsesRequest, ResponsesCall},
-};
+use crate::Error;
 
-#[tracing::instrument(name = "litellm.prepare", level = "debug", skip_all)]
-pub(super) async fn prepare(
-    call: ResponsesCall,
-    secrets: &dyn SecretSource,
-) -> Result<ProviderResponsesRequest, Error> {
-    let ResponsesProvider { identity, config } =
-        resolve_provider(&call.model, call.custom_llm_provider.as_deref())?;
-    let provider = identity.provider.as_str();
-    let model = identity.model.as_str();
-    let snapshot = secrets
-        .resolve(config.secret_names(call.api_key.as_deref(), call.api_base.as_deref()))
-        .await?;
-    let lookup = |name: &str| snapshot.get(name);
-    let environment = config.validate_environment(
-        litellm_http::request::string_headers("responses", call.extra_headers)?,
-        call.api_key.as_deref(),
-        &lookup,
-    )?;
-    let context = RequestContext {
-        model: model.into(),
-        custom_llm_provider: provider.into(),
-        optional_params: Value::Object(call.optional_params.clone()),
-        secret_fields: Vec::new(),
-        api_key: match &environment.auth {
-            litellm_llms::base_llm::auth::AuthScheme::Credential { secret, .. } => {
-                Some(secret.clone())
-            }
-            _ => None,
-        },
-    };
-    let body = config.transform_responses_api_request(model, call.input, call.optional_params)?;
-    Ok(ProviderResponsesRequest {
-        url: config.get_complete_url(call.api_base.as_deref(), &lookup),
-        config,
-        environment,
-        body,
-        context,
-        timeout: call.timeout,
-    })
-}
-
-pub(super) struct ResponsesProvider {
+pub(crate) struct ResponsesProvider {
     pub identity: ProviderIdentity,
     pub config: &'static dyn BaseResponsesApiConfig,
 }
 
 /// Python's `get_llm_provider`: a bare model is OpenAI's, and with an explicit OpenRouter
 /// provider a model without a vendor segment keeps the `openrouter/` prefix as its wire id.
-pub(super) fn resolve_provider(
+pub(crate) fn resolve_provider_config(
     model: &str,
     custom_llm_provider: Option<&str>,
 ) -> Result<ResponsesProvider, Error> {
@@ -142,7 +96,7 @@ mod tests {
         #[case] provider: &str,
         #[case] wire_model: &str,
     ) {
-        let resolved = resolve_provider(model, custom_llm_provider).unwrap();
+        let resolved = resolve_provider_config(model, custom_llm_provider).unwrap();
         assert_eq!(resolved.identity.provider, provider);
         assert_eq!(resolved.identity.model, wire_model);
     }
@@ -155,7 +109,7 @@ mod tests {
     #[case::conflicting_prefix("openrouter/anthropic/claude", Some("openai"))]
     fn everything_else_is_rejected(#[case] model: &str, #[case] custom_llm_provider: Option<&str>) {
         assert!(matches!(
-            resolve_provider(model, custom_llm_provider),
+            resolve_provider_config(model, custom_llm_provider),
             Err(Error::InvalidProvider(_) | Error::Unsupported(_))
         ));
     }

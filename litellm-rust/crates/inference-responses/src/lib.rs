@@ -6,7 +6,7 @@ pub mod types;
 pub mod websocket;
 
 mod handler;
-mod prepare;
+mod provider_config;
 
 use std::sync::Arc;
 
@@ -90,17 +90,28 @@ impl ResponsesRoute {
         interceptors: &impl Interceptors<Error>,
         observers: Option<&ObservationSender>,
     ) -> Result<ResponsesOutput, Error> {
-        let request = prepare::prepare(call, self.secrets.as_ref()).await?;
+        let provider = provider_config::resolve_provider_config(
+            &call.model,
+            call.custom_llm_provider.as_deref(),
+        )?;
         litellm_inference::diagnostic::provider(
-            &request.context.model,
-            &request.context.custom_llm_provider,
+            &provider.identity.model,
+            &provider.identity.provider,
         );
+        let secrets = self
+            .secrets
+            .resolve(
+                provider
+                    .config
+                    .secret_names(call.api_key.as_deref(), call.api_base.as_deref()),
+            )
+            .await?;
         let execute: futures_util::future::BoxFuture<'_, Result<ResponsesOutput, Error>> =
             Box::pin(handler::execute(
-                &self.http,
-                &self.auth,
-                request,
-                self.cache.clone(),
+                self,
+                provider,
+                call,
+                secrets,
                 cache_options,
                 interceptors,
                 observers,
